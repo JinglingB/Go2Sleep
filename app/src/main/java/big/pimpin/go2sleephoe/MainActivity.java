@@ -46,10 +46,16 @@ class AndroidConfig2 extends DefaultConfig {
 
 public class MainActivity extends Activity {
     private static final String HOSTNAME = "192.168.1.1";
-    private static final int PORT = 22;
+    private static final int PORT = SSHClient.DEFAULT_PORT;
     private static final String USERNAME = "toor";
     private static final String COMMAND = "C:\\ProgramData\\scoop\\apps\\sysinternals\\current\\psshutdown64.exe -accepteula -nobanner -d -t 0 & exit";
-    File privateKeyFile;
+    private File privateKeyFile;
+
+    static {
+        setupBouncyCastleForSshj();
+        System.setProperty("java.net.preferIPv4Stack", "true");
+        //System.setProperty("java.net.preferIPv6Addresses", "false");
+    }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -58,8 +64,11 @@ public class MainActivity extends Activity {
 
         //Toast.makeText(this, "Wir suchen dich", Toast.LENGTH_LONG).show();
 
-        setupBouncyCastleForSshj();
-        generateAndWriteEd25519KeyPair();
+        try {
+            generateAndWriteEd25519KeyPair();
+        } catch (final Throwable th) {
+            throw new RuntimeException(th);
+        }
 
         final Thread thread = new Thread(() -> {
             try (final SSHClient ssh = new SSHClient(new AndroidConfig2())) {
@@ -67,6 +76,7 @@ public class MainActivity extends Activity {
                 ssh.setTimeout(5000);
                 ssh.addHostKeyVerifier(new PromiscuousVerifier());
                 ssh.connect(HOSTNAME, PORT);
+                ssh.getSocket().setTcpNoDelay(true);
                 ssh.authPublickey(USERNAME, privateKeyFile.getAbsolutePath());
                 try (final Session session = ssh.startSession()) {
                     session.exec(COMMAND);
@@ -109,40 +119,36 @@ public class MainActivity extends Activity {
         SecurityUtils.setSecurityProvider(null);
     }
 
-    private void generateAndWriteEd25519KeyPair() {
-        try {
-            byte[] publicKeyBytes = null;
+    private void generateAndWriteEd25519KeyPair() throws Throwable {
+        final File publicKeyFile = new File(getExternalFilesDir(null), "id_ed25519.pub");
+        byte[] publicKeyBytes = null;
 
-            if (!privateKeyFile.exists()) {
-                final AsymmetricCipherKeyPairGenerator keyPairGenerator = new Ed25519KeyPairGenerator();
-                keyPairGenerator.init(new Ed25519KeyGenerationParameters(new SecureRandom()));
-                final AsymmetricCipherKeyPair keyPair = keyPairGenerator.generateKeyPair();
+        if (!privateKeyFile.exists()) {
+            final AsymmetricCipherKeyPairGenerator keyPairGenerator = new Ed25519KeyPairGenerator();
+            keyPairGenerator.init(new Ed25519KeyGenerationParameters(new SecureRandom()));
+            final AsymmetricCipherKeyPair keyPair = keyPairGenerator.generateKeyPair();
 
-                final byte[] privateKeyBytes = OpenSSHPrivateKeyUtil.encodePrivateKey(keyPair.getPrivate());
-                try (final FileWriter fileWriter = new FileWriter(privateKeyFile); final PemWriter pemWriter = new PemWriter(fileWriter)) {
-                    pemWriter.writeObject(new PemObject("OPENSSH PRIVATE KEY", privateKeyBytes));
-                }
-
-                publicKeyBytes = OpenSSHPublicKeyUtil.encodePublicKey(keyPair.getPublic());
+            final byte[] privateKeyBytes = OpenSSHPrivateKeyUtil.encodePrivateKey(keyPair.getPrivate());
+            try (final FileWriter fileWriter = new FileWriter(privateKeyFile); final PemWriter pemWriter = new PemWriter(fileWriter)) {
+                pemWriter.writeObject(new PemObject("OPENSSH PRIVATE KEY", privateKeyBytes));
             }
 
-            final File publicKeyFile = new File(getExternalFilesDir(null), "id_ed25519.pub");
-            if (publicKeyBytes != null || !publicKeyFile.exists()) {
-                if (publicKeyBytes == null) {
-                    try (final FileReader fileReader = new FileReader(privateKeyFile); final PemReader pemReader = new PemReader(fileReader)) {
-                        final Ed25519PrivateKeyParameters params = (Ed25519PrivateKeyParameters) OpenSSHPrivateKeyUtil.parsePrivateKeyBlob(pemReader.readPemObject().getContent());
-                        publicKeyBytes = OpenSSHPublicKeyUtil.encodePublicKey(params.generatePublicKey());
-                    }
-                }
+            publicKeyBytes = OpenSSHPublicKeyUtil.encodePublicKey(keyPair.getPublic());
+        }
 
-                try (final FileWriter fileWriter = new FileWriter(publicKeyFile)) {
-                    final String publicKeyString = String.format("ssh-ed25519 %s go2sleep@%s\n",
-                            Base64.getEncoder().encodeToString(publicKeyBytes), Build.BOARD);
-                    fileWriter.write(publicKeyString);
+        if (publicKeyBytes != null || !publicKeyFile.exists()) {
+            if (publicKeyBytes == null) {
+                try (final FileReader fileReader = new FileReader(privateKeyFile); final PemReader pemReader = new PemReader(fileReader)) {
+                    final Ed25519PrivateKeyParameters params = (Ed25519PrivateKeyParameters) OpenSSHPrivateKeyUtil.parsePrivateKeyBlob(pemReader.readPemObject().getContent());
+                    publicKeyBytes = OpenSSHPublicKeyUtil.encodePublicKey(params.generatePublicKey());
                 }
             }
-        } catch (final Throwable th) {
-            throw new RuntimeException(th);
+
+            try (final FileWriter fileWriter = new FileWriter(publicKeyFile)) {
+                final String publicKeyString = String.format("ssh-ed25519 %s go2sleep@%s",
+                        Base64.getEncoder().encodeToString(publicKeyBytes), Build.BOARD);
+                fileWriter.write(publicKeyString);
+            }
         }
     }
 }
