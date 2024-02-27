@@ -9,7 +9,6 @@ import com.hierynomus.sshj.key.KeyAlgorithms;
 import net.schmizz.sshj.DefaultConfig;
 import net.schmizz.sshj.SSHClient;
 import net.schmizz.sshj.common.SecurityUtils;
-import net.schmizz.sshj.connection.channel.direct.Session;
 import net.schmizz.sshj.transport.verification.PromiscuousVerifier;
 
 import org.bouncycastle.crypto.AsymmetricCipherKeyPair;
@@ -48,24 +47,25 @@ public class MainActivity extends Activity {
     private static final String HOSTNAME = "192.168.1.1";
     private static final int PORT = SSHClient.DEFAULT_PORT;
     private static final String USERNAME = "toor";
-    private static final String COMMAND = "C:\\ProgramData\\scoop\\apps\\sysinternals\\current\\psshutdown64.exe -accepteula -nobanner -d -t 0 & exit";
+    private static final String COMMAND = "C:\\ProgramData\\scoop\\apps\\sysinternals\\current\\psshutdown64.exe -accepteula -nobanner -d -t 0";
     private File privateKeyFile;
 
     static {
-        setupBouncyCastleForSshj();
-        System.setProperty("java.net.preferIPv4Stack", "true");
         //System.setProperty("java.net.preferIPv6Addresses", "false");
+        System.setProperty("java.net.preferIPv4Stack", "true");
+        setupBouncyCastleForSshj();
     }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         privateKeyFile = new File(getFilesDir(), "id_ed25519");
+        final File publicKeyFile = new File(getExternalFilesDir(null), "id_ed25519.pub");
 
         //Toast.makeText(this, "Wir suchen dich", Toast.LENGTH_LONG).show();
 
         try {
-            generateAndWriteEd25519KeyPair();
+            generateAndWriteEd25519KeyPair(privateKeyFile, publicKeyFile);
         } catch (final Throwable th) {
             throw new RuntimeException(th);
         }
@@ -78,9 +78,7 @@ public class MainActivity extends Activity {
                 ssh.connect(HOSTNAME, PORT);
                 ssh.getSocket().setTcpNoDelay(true);
                 ssh.authPublickey(USERNAME, privateKeyFile.getAbsolutePath());
-                try (final Session session = ssh.startSession()) {
-                    session.exec(COMMAND);
-                }
+                ssh.startSession().exec(COMMAND);
             } catch (final Throwable th) {
                 throw new RuntimeException(th);
             }
@@ -96,31 +94,27 @@ public class MainActivity extends Activity {
 
     // https://github.com/android-password-store/Android-Password-Store/blob/develop/app/src/main/java/app/passwordstore/util/git/sshj/SshjConfig.kt
     private static void setupBouncyCastleForSshj() {
-        int bcIndex = -1;
-        final Provider[] providers = Security.getProviders();
-        for (int i = 0; i < providers.length; ++i) {
-            if (BouncyCastleProvider.PROVIDER_NAME.equals(providers[i].getName())) {
-                bcIndex = i;
-                break;
-            }
-        }
+        SecurityUtils.setRegisterBouncyCastle(false);
+        SecurityUtils.setSecurityProvider(null);
 
-        if (bcIndex != -1) {
+        Provider[] providers = Security.getProviders();
+        for (int i = 0; i < providers.length; ++i) {
+            if (!BouncyCastleProvider.PROVIDER_NAME.equals(providers[i].getName()))
+                continue;
+
+            providers = null;
             Security.removeProvider(BouncyCastleProvider.PROVIDER_NAME);
             try {
                 Class.forName("sun.security.jca.Providers");
             } catch (final ClassNotFoundException ignored) {}
-            Security.insertProviderAt(new BouncyCastleProvider(), bcIndex + 1);
-        } else {
-            Security.addProvider(new BouncyCastleProvider());
+            Security.insertProviderAt(new BouncyCastleProvider(), i + 1);
+            return;
         }
 
-        SecurityUtils.setRegisterBouncyCastle(false);
-        SecurityUtils.setSecurityProvider(null);
+        Security.addProvider(new BouncyCastleProvider());
     }
 
-    private void generateAndWriteEd25519KeyPair() throws Throwable {
-        final File publicKeyFile = new File(getExternalFilesDir(null), "id_ed25519.pub");
+    private static void generateAndWriteEd25519KeyPair(final File privateKeyFile, final File publicKeyFile) throws Throwable {
         byte[] publicKeyBytes = null;
 
         if (!privateKeyFile.exists()) {
@@ -145,7 +139,7 @@ public class MainActivity extends Activity {
             }
 
             try (final FileWriter fileWriter = new FileWriter(publicKeyFile)) {
-                final String publicKeyString = String.format("ssh-ed25519 %s go2sleep@%s",
+                final String publicKeyString = String.format("ssh-ed25519 %s go2sleep@%s\n",
                         Base64.getEncoder().encodeToString(publicKeyBytes), Build.BOARD);
                 fileWriter.write(publicKeyString);
             }
